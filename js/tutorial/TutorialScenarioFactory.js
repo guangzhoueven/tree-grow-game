@@ -26,7 +26,7 @@ export function createTutorialScenario(scenario, { width = 1800, height = 1200 }
     }
 
     const areaIds = new Set(mapAreas.map(area => area.id));
-    const { redBaseId, blueBaseId } = scenario;
+    const { redBaseId, blueBaseId, lessonTargetAreaId = null } = scenario;
     if (!Number.isInteger(redBaseId) || !areaIds.has(redBaseId) ||
         !Number.isInteger(blueBaseId) || !areaIds.has(blueBaseId) ||
         redBaseId === blueBaseId) {
@@ -48,6 +48,14 @@ export function createTutorialScenario(scenario, { width = 1800, height = 1200 }
         !blueRoots.some(node => node.areaId === blueBaseId)) {
         throw new TypeError('教学场景必须在双方基地中分别包含至少一个存活根节点');
     }
+    if (lessonTargetAreaId !== null &&
+        (!Number.isInteger(lessonTargetAreaId) || !areaIds.has(lessonTargetAreaId) ||
+            !game.getAliveNodesByOwner('blue').some(node =>
+                node.areaId === lessonTargetAreaId
+            ) ||
+            !(mapManager.adjacency[redBaseId] || []).includes(lessonTargetAreaId))) {
+        throw new TypeError('教学目标必须是红方根节点可直接攻击的蓝方占据区域');
+    }
 
     return {
         sessionType: 'tutorial',
@@ -58,6 +66,7 @@ export function createTutorialScenario(scenario, { width = 1800, height = 1200 }
         game,
         ruleEngine: new RuleEngine(mapManager),
         redBaseId,
-        blueBaseId
+        blueBaseId,
+        lessonTargetAreaId
     };
 }

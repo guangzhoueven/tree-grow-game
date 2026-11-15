@@ -171,3 +171,21 @@ test('all non-combat tutorial lesson scenarios rebuild with the intended turn st
         assert.equal(runtime.game.currentTurn, mode === 'turn' ? 'blue' : 'red', mode);
     }
 });
+
+test('combat and attack lesson targets survive tutorial runtime construction', async () => {
+    const { buildScenario } = await import('../js/tutorial/TutorialController.js');
+    const combatScenario = buildScenario('combat', 'combat-target');
+    const combatRuntime = createTutorialScenario(combatScenario);
+    assert.equal(combatRuntime.lessonTargetAreaId, combatScenario.lessonTargetAreaId);
+    assert.ok(combatRuntime.mapManager.adjacency[combatRuntime.redBaseId].includes(combatRuntime.lessonTargetAreaId));
+
+    const attackScenario = buildScenario('attack', 'attack-target');
+    const attackRuntime = createTutorialScenario(attackScenario);
+    assert.equal(attackRuntime.lessonTargetAreaId, attackRuntime.blueBaseId);
+});
+
+test('tutorial scenario factory rejects an invalid or non-adjacent lesson target', () => {
+    const scenario = createScenario();
+    scenario.lessonTargetAreaId = 999;
+    assert.throws(() => createTutorialScenario(scenario), /教学目标必须是红方根节点可直接攻击的蓝方占据区域/);
+});
