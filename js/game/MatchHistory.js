@@ -30,7 +30,10 @@ export class MatchHistory {
     }
     findLastActionIndex(side) {
         if (!SIDES.includes(side)) return -1;
-        for (let i = this.actions.length - 1; i >= 0; i--) if (this.actions[i].side === side) return i;
+        for (let i = this.actions.length - 1; i >= 0; i--) {
+            const action = this.actions[i];
+            if (action.side === side && action.action.type !== 'skip') return i;
+        }
         return -1;
     }
     canUndo(side) { return this.findLastActionIndex(side) >= 0; }
