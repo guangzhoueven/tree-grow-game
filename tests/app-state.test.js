@@ -28,6 +28,7 @@ test('invalid match configurations are rejected', () => {
     const app = new AppState();
     assert.throws(() => app.startMatch({ mode: 'coop', difficulty: 'hard', playerSide: 'red' }), TypeError);
     assert.equal(app.startMatch({ mode: 'pvp', difficulty: 'expert', playerSide: 'red' }).difficulty, 'expert');
+    assert.throws(() => app.startMatch({ mode: 'pvp', difficulty: 'hard', playerSide: 'blue' }), TypeError);
 });
 
 test('returning to the menu does not mutate the match configuration', () => {
@@ -49,8 +50,9 @@ test('result screen is a valid application navigation state', () => {
 test('all four AI difficulty levels are accepted by application state', () => {
     for (const difficulty of ['easy', 'medium', 'hard', 'expert']) {
         const app = new AppState();
-        const config = app.startMatch({ mode: 'pve', difficulty, playerSide: 'red' });
+        const config = app.startMatch({ mode: 'pve', difficulty, playerSide: 'blue' });
         assert.equal(config.difficulty, difficulty);
+        assert.equal(config.playerSide, 'blue');
         assert.equal(app.screen, 'game');
     }
 });
