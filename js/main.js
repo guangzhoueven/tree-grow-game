@@ -108,6 +108,7 @@ const resultCombat = document.getElementById('result-combat');
 const resultEvents = document.getElementById('result-events');
 const resultEventsEmpty = document.getElementById('result-events-empty');
 const resultMenuBtn = document.getElementById('result-menu-btn');
+const resultSaveBtn = document.getElementById('result-save-btn');
 const resultUndoRedBtn = document.getElementById('result-undo-red-btn');
 const resultUndoBlueBtn = document.getElementById('result-undo-blue-btn');
 const resultUndoPlayerBtn = document.getElementById('result-undo-player-btn');
@@ -910,7 +911,12 @@ function applyLoadedGameData(data, sourceName = '存档') {
         appState.startMatch(activeMatchConfig);
         renderGame();
         updateUI();
-        showAppScreen('game');
+        if (game.isGameOver && lastMatchResult) {
+            renderMatchResult(lastMatchResult);
+            showAppScreen('result');
+        } else {
+            showAppScreen('game');
+        }
         if (isAIMode && gamePhase === 'playing' && game.currentTurn === getAISide('pve', activeMatchConfig.playerSide) && !game.isGameOver) {
             triggerAITurn();
         }
@@ -919,6 +925,7 @@ function applyLoadedGameData(data, sourceName = '存档') {
 }
 
 saveBtn.addEventListener('click', saveGame);
+resultSaveBtn?.addEventListener('click', saveGame);
 loadBtn.addEventListener('click', loadGame);
 function syncPveSetupFields() {
     const isPve = modeSelect.value === 'pve';
