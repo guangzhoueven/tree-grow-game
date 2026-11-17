@@ -19,3 +19,14 @@ test('action ids are not reused after truncation and history round-trips', () =>
 });
 test('rejects malformed history data', () => { assert.throws(()=>MatchHistory.start({gameState:null})); const h=MatchHistory.start(snapshot(0));
  assert.throws(()=>h.recordAction({side:'red',action:{owner:'blue'},beforeSnapshot:snapshot(0),afterSnapshot:snapshot(1)})); });
+
+test('skip events remain in the record but are never undo targets', () => {
+ const h=MatchHistory.start(snapshot(0));
+ h.recordAction({side:'red',action:{type:'growth',owner:'red'},beforeSnapshot:snapshot(0),afterSnapshot:snapshot(1),completedAt:1});
+ h.recordAction({side:'blue',action:{type:'skip',owner:'blue'},beforeSnapshot:snapshot(1),afterSnapshot:snapshot(2),completedAt:2});
+ assert.equal(h.canUndo('blue'),false);
+ const r=h.undoLatestAction('red');
+ assert.equal(r.snapshot.gameState.marker,0);
+ assert.deepEqual(r.removedActionIds,[1,2]);
+ assert.equal(h.actionCount,0);
+});
