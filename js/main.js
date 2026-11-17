@@ -584,7 +584,7 @@ function updateUndoControls() {
         button.hidden = !visible;
         if (!visible || !undoManager) { button.disabled = true; continue; }
         const state = undoManager.getState(side);
-        button.textContent = `悔棋 · 剩余 ${state.remaining}`;
+        button.textContent = (isAIMode ? '悔棋' : `${side === 'red' ? '红方' : '蓝方'}悔棋`) + ` · 剩余 ${state.remaining}`;
         button.disabled = !undoManager.canUndo(side, { history: matchHistory, gamePhase, isAnimating, isAIThinking, isPaused });
         button.title = state.coolingDown ? '完成一次新的有效生长后才能再次悔棋' :
             state.remaining === 0 ? '本方悔棋次数已用完' : '撤销本方最近一次行动及其后的所有行动';
@@ -813,6 +813,40 @@ function applyLoadedGameData(data, sourceName = '存档') {
             throw new TypeError('存档节点或基地引用了不存在的区域');
         }
 
+        // Validate all persisted match metadata against the detached game before
+        // mutating the currently active match.
+        const restoredIsAIMode = typeof data.isAIMode === 'boolean' ? data.isAIMode : isAIMode;
+        const restoredPlayerSideForConfig = data.playerSide === 'blue' ? 'blue' : 'red';
+        const restoredDifficulty = DIFFICULTY_LEVELS.includes(data.difficulty) ? data.difficulty : difficultySelect.value;
+        const restoredConfig = Object.freeze({
+            mode: restoredIsAIMode ? 'pve' : 'pvp',
+            difficulty: restoredDifficulty,
+            playerSide: restoredIsAIMode ? restoredPlayerSideForConfig : 'red'
+        });
+        const restoredTracker = MatchTracker.fromJSON(data.matchTracker) ||
+            MatchTracker.start(restoredGame, restoredConfig, { historyIncomplete: true });
+        const restoredResult = data.lastMatchResult || null;
+        const restoredSnapshot = {
+            gameState: restoredGame.toJSON(),
+            matchTracker: restoredTracker?.toJSON() || null,
+            lastMatchResult: restoredResult
+        };
+        const restoredHistory = data.matchHistory
+            ? MatchHistory.fromJSON(data.matchHistory)
+            : MatchHistory.start(restoredSnapshot, { historyIncomplete: true });
+        const historyTip = restoredHistory.actions.length
+            ? restoredHistory.actions[restoredHistory.actions.length - 1].after
+            : restoredHistory.initialSnapshot;
+        if (JSON.stringify(historyTip) !== JSON.stringify(restoredSnapshot)) {
+            throw new TypeError('存档棋谱末端与当前对局状态不一致');
+        }
+        const restoredUndo = data.undoManager
+            ? UndoManager.fromJSON(data.undoManager)
+            : new UndoManager({ mode: restoredConfig.mode, playerSide: restoredConfig.playerSide });
+        if (restoredUndo.mode !== restoredConfig.mode || restoredUndo.playerSide !== restoredConfig.playerSide) {
+            throw new TypeError('存档悔棋配置与对局模式不一致');
+        }
+
         invalidateAIRequest();
         presentation.cancel();
         if (combatTimeoutId !== null) {
@@ -857,35 +891,11 @@ function applyLoadedGameData(data, sourceName = '存档') {
         // 重建规则引擎
         ruleEngine = new RuleEngine(mapManager);
 
-        activeMatchConfig = Object.freeze({ mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value, playerSide: isAIMode ? restoredPlayerSide : 'red' });
-        matchTracker = MatchTracker.fromJSON(data.matchTracker) || MatchTracker.start(game, activeMatchConfig, { historyIncomplete: true });
-        lastMatchResult = data.lastMatchResult || null;
-        const currentSnapshot = {
-            gameState: game.toJSON(),
-            matchTracker: matchTracker?.toJSON() || null,
-            lastMatchResult: data.lastMatchResult || null
-        };
-        if (data.matchHistory) {
-            const restoredHistory = MatchHistory.fromJSON(data.matchHistory);
-            const latestSnapshot = restoredHistory.actions.length
-                ? restoredHistory.actions[restoredHistory.actions.length - 1].after
-                : restoredHistory.initialSnapshot;
-            if (JSON.stringify(latestSnapshot) !== JSON.stringify(currentSnapshot)) {
-                throw new TypeError('存档棋谱末端与当前对局状态不一致');
-            }
-            matchHistory = restoredHistory;
-        } else {
-            matchHistory = MatchHistory.start(currentSnapshot, { historyIncomplete: true });
-        }
-        if (data.undoManager) {
-            const restoredUndo = UndoManager.fromJSON(data.undoManager);
-            if (restoredUndo.mode !== activeMatchConfig.mode || restoredUndo.playerSide !== activeMatchConfig.playerSide) {
-                throw new TypeError('存档悔棋配置与对局模式不一致');
-            }
-            undoManager = restoredUndo;
-        } else {
-            undoManager = new UndoManager({ mode: isAIMode ? 'pve' : 'pvp', playerSide: activeMatchConfig.playerSide });
-        }
+        activeMatchConfig = restoredConfig;
+        matchTracker = restoredTracker;
+        lastMatchResult = restoredResult;
+        matchHistory = restoredHistory;
+        undoManager = restoredUndo;
         appState.startMatch(activeMatchConfig);
         renderGame();
         updateUI();
@@ -934,7 +944,7 @@ function persistLastMatch() {
     if (isAnimating || isAIThinking) return;
     try {
         localStorage.setItem(LAST_MATCH_KEY, JSON.stringify({
-            schemaVersion: 1, gameState: game.toJSON(), mapSeeds: mapManager.seeds,
+            schemaVersion: 2, gameState: game.toJSON(), mapSeeds: mapManager.seeds,
             redBaseId, blueBaseId, gamePhase, isAIMode,
             playerSide: activeMatchConfig?.playerSide || 'red',
             difficulty: activeMatchConfig?.difficulty || difficultySelect.value,
