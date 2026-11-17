@@ -540,9 +540,11 @@ function updateUI() {
     } else {
         const aiSide = isAIMode ? getAISide('pve', activeMatchConfig?.playerSide || 'red') : null;
         const currentLabel = game.currentTurn === 'red' ? '🔴 红方' : '🔵 蓝方';
-        const playerLabel = isAIMode && game.currentTurn === aiSide
-            ? `🤖 AI ${game.currentTurn === 'red' ? '红方' : '蓝方'}`
-            : `玩家 ${currentLabel}`;
+        const playerLabel = isAIMode
+            ? (game.currentTurn === aiSide
+                ? `🤖 AI ${game.currentTurn === 'red' ? '红方' : '蓝方'}`
+                : `玩家 ${currentLabel}`)
+            : currentLabel;
         turnIndicator.innerHTML = `当前回合：${playerLabel}`;
         endTurnBtn.textContent = '⏭️ 跳过回合';
         endTurnBtn.disabled = game.isGameOver;
