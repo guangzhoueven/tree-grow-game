@@ -519,11 +519,22 @@ function performTurnSwitch() {
 
 // --- 主动跳过回合（针对玩家或 AI 无棋可走） ---
 function performSkipTurn() {
-    matchTracker?.recordSkip(game.currentTurn);
+    const skippingSide = game.currentTurn;
+    const beforeSkipSnapshot = matchHistory ? captureHistorySnapshot() : null;
+    matchTracker?.recordSkip(skippingSide);
     // Skipping is a turn completion, not a separate state transition.
     // Reuse the authoritative cleanup/switch/AI path so frozen nodes and
     // AI scheduling cannot diverge from a normal completed action.
     performTurnSwitch();
+    if (matchHistory && beforeSkipSnapshot) {
+        matchHistory.recordAction({
+            side: skippingSide,
+            action: { type: 'skip', owner: skippingSide },
+            beforeSnapshot: beforeSkipSnapshot,
+            afterSnapshot: captureHistorySnapshot()
+        });
+        persistLastMatch();
+    }
 }
 
 function invalidateAIRequest() {
