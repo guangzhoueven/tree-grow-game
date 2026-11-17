@@ -10,6 +10,8 @@ import { PresentationController } from './presentation/PresentationController.js
 import { createCombatEvent } from './presentation/CombatEvent.js';
 import { AudioController } from './presentation/AudioController.js';
 import { MatchTracker } from './game/MatchTracker.js';
+import { MatchHistory } from './game/MatchHistory.js';
+import { UndoManager } from './game/UndoManager.js';
 import { createRematchConfig } from './app/RematchConfig.js';
 import { getAISide } from './app/MatchSides.js';
 import { getDifficultyLabel, DIFFICULTY_LEVELS } from './ai/DifficultyProfiles.js';
@@ -19,6 +21,8 @@ import { TutorialController } from './tutorial/TutorialController.js';
 const appState = new AppState();
 let activeMatchConfig = null;
 let matchTracker = null;
+let matchHistory = null;
+let undoManager = null;
 let lastMatchResult = null;
 const LAST_MATCH_KEY = 'treeGrow:lastMatch:v1';
 let game = new GameState();
@@ -181,6 +185,37 @@ function formatAIProgress(progress) {
     if (progress.phase === 'complete') return '计算完成，准备执行行动…';
     return '正在分析当前局面…';
 }
+function captureHistorySnapshot() {
+    return MatchHistory.capture({ gameState: game.toJSON(), matchTracker: matchTracker?.toJSON() || null, lastMatchResult });
+}
+
+function recordCompletedGrowth(owner, action, beforeSnapshot) {
+    if (!matchHistory || !undoManager || !beforeSnapshot) return;
+    matchHistory.recordAction({ side: owner, action, beforeSnapshot, afterSnapshot: captureHistorySnapshot() });
+    undoManager.onActionCompleted(owner);
+}
+
+function undoMatchAction(side) {
+    if (!undoManager?.canUndo(side, { history: matchHistory, gamePhase, isAnimating, isAIThinking, isPaused })) return false;
+    const result = matchHistory.undoLatestAction(side);
+    if (!result) return false;
+    undoManager.consumeUndo(side);
+    invalidateAIRequest();
+    presentation.cancel();
+    if (combatTimeoutId !== null) { clearTimeout(combatTimeoutId); combatTimeoutId = null; }
+    isAnimating = false; isPaused = false; dyingNodes = []; selectedNodeId = null;
+    hoverAreaId = null; aiTargetAreaId = null; legalAreaIds = new Set();
+    clearCombatExplanation(); clearAIExplanation();
+    game = GameState.fromJSON(result.snapshot.gameState);
+    matchTracker = result.snapshot.matchTracker ? MatchTracker.fromJSON(result.snapshot.matchTracker) : null;
+    lastMatchResult = result.snapshot.lastMatchResult || null;
+    if (game.isGameOver || appState.screen === 'result') showAppScreen('game');
+    updateUI(); renderGame();
+    if (isAIMode && gamePhase === 'playing' && !game.isGameOver &&
+        game.currentTurn === getAISide('pve', activeMatchConfig?.playerSide || 'red')) triggerAITurn();
+    return true;
+}
+
 function finishMatch(winner, reason) {
     if (game.isGameOver) return;
     game.isGameOver = true;
@@ -306,6 +341,7 @@ if (aiWorker) {
             return;
         }
 
+        const beforeActionSnapshot = captureHistorySnapshot();
         const growthResult = executeGrowthAction({
             gameState: game,
             ruleEngine,
@@ -327,7 +363,7 @@ if (aiWorker) {
         aiTargetAreaId = targetAreaId;
         selectedNodeId = null;
         renderGame();
-        processSuccessfulGrowth(newNode, getAISide('pve', activeMatchConfig?.playerSide || 'red'));
+        processSuccessfulGrowth(newNode, getAISide('pve', activeMatchConfig?.playerSide || 'red'), beforeActionSnapshot, growthResult.action);
     };
 } else {
     console.warn('浏览器不支持 Web Worker，AI 模式无法运行。');
@@ -340,7 +376,7 @@ if (!aiWorker && pveOption) {
 }
 
 // --- 【核心提取】通用成长后处理函数（人类和 AI 共用） ---
-function processSuccessfulGrowth(newNode, owner) {
+function processSuccessfulGrowth(newNode, owner, beforeActionSnapshot, action) {
     const enemyBaseId = owner === 'red' ? blueBaseId : redBaseId;
     const isAttack = newNode.areaId !== enemyBaseId && game.getAliveNodes().some(node => node.id !== newNode.id && node.owner !== owner && node.areaId === newNode.areaId);
     matchTracker?.recordGrowth(game, newNode, { isAttack });
@@ -361,14 +397,18 @@ function processSuccessfulGrowth(newNode, owner) {
             finishMatch(owner, 'enemy_base_reached');
             showFeedback(`${owner === 'red' ? '红方' : '蓝方'}成功突入敌方基地，获得胜利。`, 'success', 3600);
             audio.play('victory');
-            updateUI(); renderGame(); return;
+            updateUI(); renderGame();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
+            return;
         }
         const rivalNode = game.getAliveNodes().find(node =>
             node.id !== newNode.id && node.owner !== owner && node.areaId === newNode.areaId
         );
         if (!rivalNode) {
             showFeedback(`生长成功：进入区域 ${newNode.areaId}。`, 'success');
-            performTurnSwitch(); return;
+            performTurnSwitch();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
+            return;
         }
         const combat = resolveCombat(game, newNode, rivalNode);
         const nodesToDelete = [...new Set(combat.nodesToDelete)];
@@ -400,6 +440,7 @@ function processSuccessfulGrowth(newNode, owner) {
                 showFeedback('蓝方全部根节点被摧毁，红方获胜。', 'success', 3600);
                 audio.play('victory');
             } else performTurnSwitch();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
             updateUI();
             renderGame();
         };
@@ -412,6 +453,7 @@ function processSuccessfulGrowth(newNode, owner) {
             matchTracker?.syncAfterMutation(game);
             isAnimating = false;
             performTurnSwitch();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
             updateUI();
             renderGame();
             return;
@@ -783,6 +825,9 @@ function applyLoadedGameData(data, sourceName = '存档') {
 
         activeMatchConfig = Object.freeze({ mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value, playerSide: isAIMode ? restoredPlayerSide : 'red' });
         matchTracker = MatchTracker.fromJSON(data.matchTracker) || MatchTracker.start(game, activeMatchConfig, { historyIncomplete: true });
+        // Until persisted history is added, a loaded legacy save starts a marked, non-undoable segment.
+        matchHistory = MatchHistory.start(captureHistorySnapshot(), { historyIncomplete: true });
+        undoManager = new UndoManager({ mode: isAIMode ? 'pve' : 'pvp', playerSide: activeMatchConfig.playerSide });
         appState.startMatch(activeMatchConfig);
         renderGame();
         updateUI();
@@ -869,6 +914,8 @@ function beginNewMatch(configOverride = null) {
     // 重置整个游戏到开局状态
     game = new GameState();
     matchTracker = null;
+    matchHistory = null;
+    undoManager = null;
     mapAreas = mapManager.generateMap(50);
     ruleEngine = new RuleEngine(mapManager);
     
@@ -975,6 +1022,8 @@ document.getElementById('gameCanvas').addEventListener('click', (e) => {
         generateRootNodesInArea(redBaseId, 'red', 3);
         generateRootNodesInArea(blueBaseId, 'blue', 3);
         matchTracker = MatchTracker.start(game, activeMatchConfig || { mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value });
+        matchHistory = MatchHistory.start(captureHistorySnapshot());
+        undoManager = new UndoManager({ mode: isAIMode ? 'pve' : 'pvp', playerSide: activeMatchConfig?.playerSide || 'red' });
         selectedNodeId = null;
         drawer.renderMap(mapAreas, redBaseId, blueBaseId);
         drawer.renderNodes(game.getAliveNodes(), selectedNodeId);
@@ -1046,6 +1095,7 @@ document.getElementById('gameCanvas').addEventListener('click', (e) => {
     const owner = game.currentTurn;
     const ownBaseId = owner === 'red' ? redBaseId : blueBaseId;
     const enemyBaseId = owner === 'red' ? blueBaseId : redBaseId;
+    const beforeActionSnapshot = captureHistorySnapshot();
     const growthResult = executeGrowthAction({
         gameState: game,
         ruleEngine,
@@ -1063,7 +1113,7 @@ document.getElementById('gameCanvas').addEventListener('click', (e) => {
 
     const newNode = growthResult.node;
     console.log(`【生长成功】父节点 ID: ${growthResult.action.parentNodeId}，新节点 ID: ${newNode.id}，位于区域 ${clickedAreaId}`);
-    processSuccessfulGrowth(newNode, owner);
+    processSuccessfulGrowth(newNode, owner, beforeActionSnapshot, growthResult.action);
 });
 
 pauseBtn.addEventListener('click', () => {
