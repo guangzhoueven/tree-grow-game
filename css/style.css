@@ -244,3 +244,7 @@
 .tutorial-actions .button{min-height:42px;padding:0 10px;font-size:12px}
 @media(max-width:900px){.tutorial-screen{height:auto;min-height:100vh;min-height:100dvh;overflow:visible}.tutorial-layout{grid-template-columns:1fr;grid-template-rows:minmax(260px,48vh) auto}.tutorial-card{min-height:310px}.tutorial-header{align-items:flex-start}.tutorial-header-actions{flex-direction:column;align-items:flex-end;gap:6px}}
 @media(max-width:520px){.tutorial-header{padding:10px}.tutorial-header h1{font-size:19px}.tutorial-header-actions{font-size:10px}.tutorial-layout{grid-template-rows:minmax(230px,38vh) auto}.tutorial-card{padding:17px}}
+
+
+/* Match undo controls */
+.undo-button{border-color:rgba(139,211,183,.28);color:#a9d9c4;background:rgba(55,104,88,.18);font-variant-numeric:tabular-nums}.undo-button:hover:not(:disabled){border-color:rgba(139,211,183,.58);background:rgba(55,104,88,.32)}.undo-button:disabled{opacity:.42;cursor:not-allowed}.undo-button[hidden]{display:none!important}@media(max-width:900px){.turn-controls .undo-button{min-height:30px;padding:0 8px;font-size:10px}}

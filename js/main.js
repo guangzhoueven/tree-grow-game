@@ -10,7 +10,10 @@ import { PresentationController } from './presentation/PresentationController.js
 import { createCombatEvent } from './presentation/CombatEvent.js';
 import { AudioController } from './presentation/AudioController.js';
 import { MatchTracker } from './game/MatchTracker.js';
+import { MatchHistory } from './game/MatchHistory.js';
+import { UndoManager } from './game/UndoManager.js';
 import { createRematchConfig } from './app/RematchConfig.js';
+import { getAISide } from './app/MatchSides.js';
 import { getDifficultyLabel, DIFFICULTY_LEVELS } from './ai/DifficultyProfiles.js';
 import { TutorialController } from './tutorial/TutorialController.js';
 
@@ -18,6 +21,8 @@ import { TutorialController } from './tutorial/TutorialController.js';
 const appState = new AppState();
 let activeMatchConfig = null;
 let matchTracker = null;
+let matchHistory = null;
+let undoManager = null;
 let lastMatchResult = null;
 const LAST_MATCH_KEY = 'treeGrow:lastMatch:v1';
 let game = new GameState();
@@ -54,6 +59,9 @@ const turnIndicator = document.getElementById('turnIndicator');
 const gameHint = document.getElementById('game-hint');
 const stageCaption = document.getElementById('stage-caption-text');
 const endTurnBtn = document.getElementById('endTurn');
+const undoRedBtn = document.getElementById('undo-red-btn');
+const undoBlueBtn = document.getElementById('undo-blue-btn');
+const undoPlayerBtn = document.getElementById('undo-player-btn');
 const saveBtn = document.getElementById('saveBtn');
 const loadBtn = document.getElementById('loadBtn');
 const pauseBtn = document.getElementById('pauseBtn');
@@ -71,6 +79,8 @@ const resetViewportBtn = document.getElementById('reset-viewport-btn');
 const modeSelect = document.getElementById('mode-select');
 const difficultySelect = document.getElementById('difficulty-select');
 const difficultyGroup = document.getElementById('difficulty-group');
+const playerSideSelect = document.getElementById('player-side-select');
+const playerSideGroup = document.getElementById('player-side-group');
 const startGameBtn = document.getElementById('start-game-btn');
 const menuScreen = document.getElementById('menu-screen');
 const setupScreen = document.getElementById('setup-screen');
@@ -98,6 +108,10 @@ const resultCombat = document.getElementById('result-combat');
 const resultEvents = document.getElementById('result-events');
 const resultEventsEmpty = document.getElementById('result-events-empty');
 const resultMenuBtn = document.getElementById('result-menu-btn');
+const resultSaveBtn = document.getElementById('result-save-btn');
+const resultUndoRedBtn = document.getElementById('result-undo-red-btn');
+const resultUndoBlueBtn = document.getElementById('result-undo-blue-btn');
+const resultUndoPlayerBtn = document.getElementById('result-undo-player-btn');
 const resultRematchBtn = document.getElementById('result-rematch-btn');
 const newGameBtn = document.getElementById('new-game-btn');
 const continueGameBtn = document.getElementById('continue-game-btn');
@@ -178,6 +192,39 @@ function formatAIProgress(progress) {
     if (progress.phase === 'complete') return '计算完成，准备执行行动…';
     return '正在分析当前局面…';
 }
+function captureHistorySnapshot() {
+    return MatchHistory.capture({ gameState: game.toJSON(), matchTracker: matchTracker?.toJSON() || null, lastMatchResult });
+}
+
+function recordCompletedGrowth(owner, action, beforeSnapshot) {
+    if (!matchHistory || !undoManager || !beforeSnapshot) return;
+    matchHistory.recordAction({ side: owner, action, beforeSnapshot, afterSnapshot: captureHistorySnapshot() });
+    undoManager.onActionCompleted(owner);
+    updateUndoControls();
+    persistLastMatch();
+}
+
+function undoMatchAction(side) {
+    if (!undoManager?.canUndo(side, { history: matchHistory, gamePhase, isAnimating, isAIThinking, isPaused })) return false;
+    const result = matchHistory.undoLatestAction(side);
+    if (!result) return false;
+    undoManager.consumeUndo(side);
+    invalidateAIRequest();
+    presentation.cancel();
+    if (combatTimeoutId !== null) { clearTimeout(combatTimeoutId); combatTimeoutId = null; }
+    isAnimating = false; isPaused = false; dyingNodes = []; selectedNodeId = null;
+    hoverAreaId = null; aiTargetAreaId = null; legalAreaIds = new Set();
+    clearCombatExplanation(); clearAIExplanation();
+    game = GameState.fromJSON(result.snapshot.gameState);
+    matchTracker = result.snapshot.matchTracker ? MatchTracker.fromJSON(result.snapshot.matchTracker) : null;
+    lastMatchResult = result.snapshot.lastMatchResult || null;
+    if (game.isGameOver || appState.screen === 'result') showAppScreen('game');
+    updateUI(); renderGame();
+    if (isAIMode && gamePhase === 'playing' && !game.isGameOver &&
+        game.currentTurn === getAISide('pve', activeMatchConfig?.playerSide || 'red')) triggerAITurn();
+    return true;
+}
+
 function finishMatch(winner, reason) {
     if (game.isGameOver) return;
     game.isGameOver = true;
@@ -191,7 +238,12 @@ function formatMatchDuration(milliseconds) {
     return hours ? hours + '小时 ' + minutes + '分' : minutes ? minutes + '分 ' + remainder + '秒' : remainder + '秒';
 }
 function formatRate(value) { return value === null || !Number.isFinite(value) ? '—' : (value * 100).toFixed(1) + '%'; }
-function resultSideLabel(side, result) { if (result.mode === 'pve') return side === 'red' ? '红方 · 玩家' : '蓝方 · AI'; return side === 'red' ? '红方' : '蓝方'; }
+function resultSideLabel(side, result) {
+    if (result.mode === 'pve') return side === (activeMatchConfig?.playerSide || 'red')
+        ? (side === 'red' ? '红方 · 玩家' : '蓝方 · 玩家')
+        : (side === 'red' ? '红方 · AI' : '蓝方 · AI');
+    return side === 'red' ? '红方' : '蓝方';
+}
 function appendResultText(parent, tag, className, value) { const el = document.createElement(tag); if (className) el.className = className; el.textContent = String(value); parent.appendChild(el); return el; }
 function renderResultComparison(container, result, rows) {
     container.replaceChildren(); const head = document.createElement('div'); head.className = 'result-compare-head';
@@ -211,7 +263,9 @@ function describeMatchEvent(event, result) {
 }
 function renderMatchResult(result) {
     const winnerLabel = resultSideLabel(result.winner, result);
-    resultTitle.textContent = result.mode === 'pve' ? (result.winner === 'red' ? '胜利' : '本局失败') : winnerLabel + '获胜';
+    resultTitle.textContent = result.mode === 'pve'
+        ? (result.winner === (activeMatchConfig?.playerSide || 'red') ? '胜利' : '本局失败')
+        : winnerLabel + '获胜';
     resultSubtitle.textContent = result.winReason === 'enemy_base_reached' ? '胜利条件：成功突入敌方基地' : '胜利条件：摧毁对方全部根节点';
     resultMeta.replaceChildren(); const meta = [result.mode === 'pve' ? '人机对战 · AI ' + getDifficultyLabel(result.difficulty) : '双人对战', '获胜方：' + winnerLabel];
     if (result.historyIncomplete) meta.push('部分历史数据不可用'); meta.forEach(value => appendResultText(resultMeta, 'span', '', value));
@@ -296,15 +350,16 @@ if (aiWorker) {
             return;
         }
 
+        const beforeActionSnapshot = captureHistorySnapshot();
         const growthResult = executeGrowthAction({
             gameState: game,
             ruleEngine,
             mapAreas,
             parentNodeId,
             targetAreaId,
-            owner: 'blue',
-            ownBaseId: blueBaseId,
-            enemyBaseId: redBaseId
+            owner: getAISide('pve', activeMatchConfig?.playerSide || 'red'),
+            ownBaseId: getAISide('pve', activeMatchConfig?.playerSide || 'red') === 'red' ? redBaseId : blueBaseId,
+            enemyBaseId: getAISide('pve', activeMatchConfig?.playerSide || 'red') === 'red' ? blueBaseId : redBaseId
         });
         if (!growthResult.ok) {
             failAITurn(`AI 行动未通过统一规则验证：${growthResult.reason}`);
@@ -317,7 +372,7 @@ if (aiWorker) {
         aiTargetAreaId = targetAreaId;
         selectedNodeId = null;
         renderGame();
-        processSuccessfulGrowth(newNode, 'blue');
+        processSuccessfulGrowth(newNode, getAISide('pve', activeMatchConfig?.playerSide || 'red'), beforeActionSnapshot, growthResult.action);
     };
 } else {
     console.warn('浏览器不支持 Web Worker，AI 模式无法运行。');
@@ -330,7 +385,7 @@ if (!aiWorker && pveOption) {
 }
 
 // --- 【核心提取】通用成长后处理函数（人类和 AI 共用） ---
-function processSuccessfulGrowth(newNode, owner) {
+function processSuccessfulGrowth(newNode, owner, beforeActionSnapshot, action) {
     const enemyBaseId = owner === 'red' ? blueBaseId : redBaseId;
     const isAttack = newNode.areaId !== enemyBaseId && game.getAliveNodes().some(node => node.id !== newNode.id && node.owner !== owner && node.areaId === newNode.areaId);
     matchTracker?.recordGrowth(game, newNode, { isAttack });
@@ -342,7 +397,7 @@ function processSuccessfulGrowth(newNode, owner) {
 
     const finishGrowth = () => {
         isAnimating = false;
-        if (owner === 'blue' && isAIMode) {
+        if (isAIMode && owner === getAISide('pve', activeMatchConfig?.playerSide || 'red')) {
             aiTargetAreaId = null;
             renderGame();
         }
@@ -351,14 +406,18 @@ function processSuccessfulGrowth(newNode, owner) {
             finishMatch(owner, 'enemy_base_reached');
             showFeedback(`${owner === 'red' ? '红方' : '蓝方'}成功突入敌方基地，获得胜利。`, 'success', 3600);
             audio.play('victory');
-            updateUI(); renderGame(); return;
+            updateUI(); renderGame();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
+            return;
         }
         const rivalNode = game.getAliveNodes().find(node =>
             node.id !== newNode.id && node.owner !== owner && node.areaId === newNode.areaId
         );
         if (!rivalNode) {
             showFeedback(`生长成功：进入区域 ${newNode.areaId}。`, 'success');
-            performTurnSwitch(); return;
+            performTurnSwitch();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
+            return;
         }
         const combat = resolveCombat(game, newNode, rivalNode);
         const nodesToDelete = [...new Set(combat.nodesToDelete)];
@@ -390,6 +449,7 @@ function processSuccessfulGrowth(newNode, owner) {
                 showFeedback('蓝方全部根节点被摧毁，红方获胜。', 'success', 3600);
                 audio.play('victory');
             } else performTurnSwitch();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
             updateUI();
             renderGame();
         };
@@ -402,6 +462,7 @@ function processSuccessfulGrowth(newNode, owner) {
             matchTracker?.syncAfterMutation(game);
             isAnimating = false;
             performTurnSwitch();
+            recordCompletedGrowth(owner, action, beforeActionSnapshot);
             updateUI();
             renderGame();
             return;
@@ -452,18 +513,29 @@ function performTurnSwitch() {
     updateUI();
     renderGame();
 
-    if (isAIMode && game.currentTurn === 'blue' && !game.isGameOver && !isAIThinking) {
+    if (isAIMode && game.currentTurn === getAISide('pve', activeMatchConfig?.playerSide || 'red') && !game.isGameOver && !isAIThinking) {
         triggerAITurn();
     }
 }
 
 // --- 主动跳过回合（针对玩家或 AI 无棋可走） ---
 function performSkipTurn() {
-    matchTracker?.recordSkip(game.currentTurn);
+    const skippingSide = game.currentTurn;
+    const beforeSkipSnapshot = matchHistory ? captureHistorySnapshot() : null;
+    matchTracker?.recordSkip(skippingSide);
     // Skipping is a turn completion, not a separate state transition.
     // Reuse the authoritative cleanup/switch/AI path so frozen nodes and
     // AI scheduling cannot diverge from a normal completed action.
     performTurnSwitch();
+    if (matchHistory && beforeSkipSnapshot) {
+        matchHistory.recordAction({
+            side: skippingSide,
+            action: { type: 'skip', owner: skippingSide },
+            beforeSnapshot: beforeSkipSnapshot,
+            afterSnapshot: captureHistorySnapshot()
+        });
+        persistLastMatch();
+    }
 }
 
 function invalidateAIRequest() {
@@ -475,7 +547,8 @@ function invalidateAIRequest() {
 // --- 触发 AI 运算 ---
 function triggerAITurn() {
     console.log('【AI 追踪 1】检测到 AI 回合，准备发送消息给 Worker');
-    if (isPaused || !isAIMode || game.currentTurn !== 'blue' || isAIThinking || game.isGameOver) return;
+    const aiSide = getAISide('pve', activeMatchConfig?.playerSide || 'red');
+    if (isPaused || !isAIMode || game.currentTurn !== aiSide || isAIThinking || game.isGameOver) return;
     if (!aiWorker) {
         failAITurn('当前环境不支持 AI Worker');
         return;
@@ -499,7 +572,7 @@ function triggerAITurn() {
             adjacency: adjacency,
             areaCenters: areaCenters,
             difficulty: difficultySelect.value,
-            playerSide: 'blue',
+            playerSide: aiSide,
             redBaseId: redBaseId,
             blueBaseId: blueBaseId
         });
@@ -509,6 +582,27 @@ function triggerAITurn() {
 }
 
 // 界面更新函数
+function updateUndoControls() {
+    const controls = [
+        { button: undoRedBtn, side: 'red', visible: !isAIMode },
+        { button: undoBlueBtn, side: 'blue', visible: !isAIMode },
+        { button: undoPlayerBtn, side: activeMatchConfig?.playerSide || 'red', visible: isAIMode },
+        { button: resultUndoRedBtn, side: 'red', visible: !isAIMode && game.isGameOver },
+        { button: resultUndoBlueBtn, side: 'blue', visible: !isAIMode && game.isGameOver },
+        { button: resultUndoPlayerBtn, side: activeMatchConfig?.playerSide || 'red', visible: isAIMode && game.isGameOver }
+    ];
+    for (const { button, side, visible } of controls) {
+        if (!button) continue;
+        button.hidden = !visible;
+        if (!visible || !undoManager) { button.disabled = true; continue; }
+        const state = undoManager.getState(side);
+        button.textContent = (isAIMode ? '悔棋' : `${side === 'red' ? '红方' : '蓝方'}悔棋`) + ` · 剩余 ${state.remaining}`;
+        button.disabled = !undoManager.canUndo(side, { history: matchHistory, gamePhase, isAnimating, isAIThinking, isPaused });
+        button.title = state.coolingDown ? '完成一次新的有效生长后才能再次悔棋' :
+            state.remaining === 0 ? '本方悔棋次数已用完' : '撤销本方最近一次行动及其后的所有行动';
+    }
+}
+
 function updateUI() {
     if (pauseBtn) { pauseBtn.textContent = isPaused ? '继续' : '暂停'; pauseBtn.disabled = gamePhase !== 'playing' || game.isGameOver || isAnimating || isAIThinking; }
     if (restartBtn) restartBtn.disabled = isAnimating || isAIThinking;
@@ -518,20 +612,28 @@ function updateUI() {
     if (modeIndicator) modeIndicator.textContent = isAIMode ? `人机 · ${getDifficultyLabel(difficultySelect.value)}` : '双人对战';
     if (isPaused) { turnIndicator.textContent = '对局已暂停'; endTurnBtn.disabled = true; }
     else if (gamePhase === 'selectRed') {
-        turnIndicator.innerHTML = '🔴 <strong>红方玩家</strong>，请点击地图上的区域作为你的基地！';
+        turnIndicator.innerHTML = '🔴 <strong>请为红方选择基地</strong>，点击地图上的区域。';
         endTurnBtn.disabled = true;
     } else if (gamePhase === 'selectBlue') {
-        turnIndicator.innerHTML = '🔵 <strong>蓝方玩家</strong>，请点击地图上的区域作为你的基地！';
+        turnIndicator.innerHTML = '🔵 <strong>请为蓝方选择基地</strong>，点击地图上的区域。';
         endTurnBtn.disabled = true;
     } else if (isAIThinking) {
         turnIndicator.innerHTML = `🤖 <strong>AI 对手</strong> 正在思考…<small class="ai-progress-detail">${formatAIProgress(aiProgress)}</small>`;
         endTurnBtn.disabled = true;
     } else {
-        const playerLabel = game.currentTurn === 'red' ? '🔴 红方' : (isAIMode ? '🤖 AI 蓝方' : '🔵 蓝方');
+        const aiSide = isAIMode ? getAISide('pve', activeMatchConfig?.playerSide || 'red') : null;
+        const currentLabel = game.currentTurn === 'red' ? '🔴 红方' : '🔵 蓝方';
+        const playerLabel = isAIMode
+            ? (game.currentTurn === aiSide
+                ? `🤖 AI ${game.currentTurn === 'red' ? '红方' : '蓝方'}`
+                : `玩家 ${currentLabel}`)
+            : currentLabel;
         turnIndicator.innerHTML = `当前回合：${playerLabel}`;
         endTurnBtn.textContent = '⏭️ 跳过回合';
         endTurnBtn.disabled = game.isGameOver;
     }
+
+    updateUndoControls();
 
     if (stageCaption && gameHint) {
         if (isPaused) {
@@ -545,7 +647,7 @@ function updateUI() {
             gameHint.textContent = '点击地图区域，为红方选择基地。';
         } else if (gamePhase === 'selectBlue') {
             stageCaption.textContent = '基地部署';
-            gameHint.textContent = isAIMode ? 'AI 正在选择蓝方基地…' : '点击地图区域，为蓝方选择基地。';
+            gameHint.textContent = '点击地图区域，为蓝方选择基地。';
         } else {
             stageCaption.textContent = '对局进行中';
             gameHint.textContent = isAIThinking ? 'AI 对手正在思考…' : '选择己方可生长节点，查看合法目标区域。';
@@ -608,15 +710,19 @@ function getGameBlob() {
         return null;
     }
     const data = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         gameState: game.toJSON(),
         mapSeeds: mapManager.seeds,
         redBaseId: redBaseId,
         blueBaseId: blueBaseId,
         gamePhase: gamePhase,
         isAIMode: isAIMode,
+        playerSide: activeMatchConfig?.playerSide || 'red',
         difficulty: activeMatchConfig?.difficulty || difficultySelect.value,
-        matchTracker: matchTracker?.toJSON() || null
+        matchTracker: matchTracker?.toJSON() || null,
+        matchHistory: matchHistory?.toJSON() || null,
+        undoManager: undoManager?.toJSON() || null,
+        lastMatchResult
     };
     return new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
 }
@@ -719,6 +825,40 @@ function applyLoadedGameData(data, sourceName = '存档') {
             throw new TypeError('存档节点或基地引用了不存在的区域');
         }
 
+        // Validate all persisted match metadata against the detached game before
+        // mutating the currently active match.
+        const restoredIsAIMode = typeof data.isAIMode === 'boolean' ? data.isAIMode : isAIMode;
+        const restoredPlayerSideForConfig = data.playerSide === 'blue' ? 'blue' : 'red';
+        const restoredDifficulty = DIFFICULTY_LEVELS.includes(data.difficulty) ? data.difficulty : difficultySelect.value;
+        const restoredConfig = Object.freeze({
+            mode: restoredIsAIMode ? 'pve' : 'pvp',
+            difficulty: restoredDifficulty,
+            playerSide: restoredIsAIMode ? restoredPlayerSideForConfig : 'red'
+        });
+        const restoredTracker = MatchTracker.fromJSON(data.matchTracker) ||
+            MatchTracker.start(restoredGame, restoredConfig, { historyIncomplete: true });
+        const restoredResult = data.lastMatchResult || null;
+        const restoredSnapshot = {
+            gameState: restoredGame.toJSON(),
+            matchTracker: restoredTracker?.toJSON() || null,
+            lastMatchResult: restoredResult
+        };
+        const restoredHistory = data.matchHistory
+            ? MatchHistory.fromJSON(data.matchHistory)
+            : MatchHistory.start(restoredSnapshot, { historyIncomplete: true });
+        const historyTip = restoredHistory.actions.length
+            ? restoredHistory.actions[restoredHistory.actions.length - 1].after
+            : restoredHistory.initialSnapshot;
+        if (JSON.stringify(historyTip) !== JSON.stringify(restoredSnapshot)) {
+            throw new TypeError('存档棋谱末端与当前对局状态不一致');
+        }
+        const restoredUndo = data.undoManager
+            ? UndoManager.fromJSON(data.undoManager)
+            : new UndoManager({ mode: restoredConfig.mode, playerSide: restoredConfig.playerSide });
+        if (restoredUndo.mode !== restoredConfig.mode || restoredUndo.playerSide !== restoredConfig.playerSide) {
+            throw new TypeError('存档悔棋配置与对局模式不一致');
+        }
+
         invalidateAIRequest();
         presentation.cancel();
         if (combatTimeoutId !== null) {
@@ -745,10 +885,13 @@ function applyLoadedGameData(data, sourceName = '存档') {
             isAIMode = data.isAIMode;
             modeSelect.value = isAIMode ? 'pve' : 'pvp';
         }
+        const restoredPlayerSide = data.playerSide === 'blue' ? 'blue' : 'red';
+        playerSideSelect.value = restoredPlayerSide;
         if (DIFFICULTY_LEVELS.includes(data.difficulty)) {
             difficultySelect.value = data.difficulty;
         }
         difficultyGroup.hidden = !isAIMode;
+        playerSideGroup.hidden = !isAIMode;
 
         // 恢复变量
         redBaseId = data.redBaseId;
@@ -760,13 +903,21 @@ function applyLoadedGameData(data, sourceName = '存档') {
         // 重建规则引擎
         ruleEngine = new RuleEngine(mapManager);
 
-        activeMatchConfig = Object.freeze({ mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value, playerSide: 'red' });
-        matchTracker = MatchTracker.fromJSON(data.matchTracker) || MatchTracker.start(game, activeMatchConfig, { historyIncomplete: true });
+        activeMatchConfig = restoredConfig;
+        matchTracker = restoredTracker;
+        lastMatchResult = restoredResult;
+        matchHistory = restoredHistory;
+        undoManager = restoredUndo;
         appState.startMatch(activeMatchConfig);
         renderGame();
         updateUI();
-        showAppScreen('game');
-        if (isAIMode && gamePhase === 'playing' && game.currentTurn === 'blue' && !game.isGameOver) {
+        if (game.isGameOver && lastMatchResult) {
+            renderMatchResult(lastMatchResult);
+            showAppScreen('result');
+        } else {
+            showAppScreen('game');
+        }
+        if (isAIMode && gamePhase === 'playing' && game.currentTurn === getAISide('pve', activeMatchConfig.playerSide) && !game.isGameOver) {
             triggerAITurn();
         }
         console.log('【读档成功】已恢复之前进度！');
@@ -774,10 +925,14 @@ function applyLoadedGameData(data, sourceName = '存档') {
 }
 
 saveBtn.addEventListener('click', saveGame);
+resultSaveBtn?.addEventListener('click', saveGame);
 loadBtn.addEventListener('click', loadGame);
-modeSelect.addEventListener('change', () => {
-    difficultyGroup.hidden = modeSelect.value !== 'pve';
-});
+function syncPveSetupFields() {
+    const isPve = modeSelect.value === 'pve';
+    difficultyGroup.hidden = !isPve;
+    playerSideGroup.hidden = !isPve;
+}
+modeSelect.addEventListener('change', syncPveSetupFields);
 
 function showAppScreen(screen) {
     appState.navigate(screen);
@@ -804,14 +959,17 @@ function updateMenuUI() {
 
 function persistLastMatch() {
     if (game.isGameOver || !['selectBlue', 'playing'].includes(gamePhase) || !redBaseId) return;
-    if (isAIMode && gamePhase === 'selectBlue' && blueBaseId === null) return;
     if (isAnimating || isAIThinking) return;
     try {
         localStorage.setItem(LAST_MATCH_KEY, JSON.stringify({
-            schemaVersion: 1, gameState: game.toJSON(), mapSeeds: mapManager.seeds,
+            schemaVersion: 2, gameState: game.toJSON(), mapSeeds: mapManager.seeds,
             redBaseId, blueBaseId, gamePhase, isAIMode,
+            playerSide: activeMatchConfig?.playerSide || 'red',
             difficulty: activeMatchConfig?.difficulty || difficultySelect.value,
-            matchTracker: matchTracker?.toJSON() || null
+            matchTracker: matchTracker?.toJSON() || null,
+            matchHistory: matchHistory?.toJSON() || null,
+            undoManager: undoManager?.toJSON() || null,
+            lastMatchResult
         }));
     } catch (error) { console.warn('最近对局自动保存失败：', error); }
 }
@@ -821,11 +979,12 @@ function beginNewMatch(configOverride = null) {
     const config = createRematchConfig(configOverride || {
         mode: modeSelect.value === 'pve' ? 'pve' : 'pvp',
         difficulty: difficultySelect.value,
-        playerSide: 'red'
+        playerSide: modeSelect.value === 'pve' ? playerSideSelect.value : 'red'
     });
     modeSelect.value = config.mode;
     difficultySelect.value = config.difficulty;
-    difficultyGroup.hidden = config.mode !== 'pve';
+    playerSideSelect.value = config.playerSide;
+    syncPveSetupFields();
     try { localStorage.removeItem(LAST_MATCH_KEY); } catch (error) { console.warn('清理上一局自动恢复记录失败：', error); }
     if (feedbackTimeoutId !== null) { clearTimeout(feedbackTimeoutId); feedbackTimeoutId = null; }
     if (actionFeedback) actionFeedback.hidden = true;
@@ -844,6 +1003,8 @@ function beginNewMatch(configOverride = null) {
     // 重置整个游戏到开局状态
     game = new GameState();
     matchTracker = null;
+    matchHistory = null;
+    undoManager = null;
     mapAreas = mapManager.generateMap(50);
     ruleEngine = new RuleEngine(mapManager);
     
@@ -879,6 +1040,8 @@ newGameBtn.addEventListener('click', () => {
     modeSelect.value = 'pvp';
     difficultySelect.value = 'medium';
     difficultyGroup.hidden = true;
+    playerSideGroup.hidden = true;
+    playerSideSelect.value = 'red';
     appState.openSetup();
     showAppScreen('setup');
 });
@@ -937,69 +1100,7 @@ document.getElementById('gameCanvas').addEventListener('click', (e) => {
         updateUI();
         persistLastMatch();
 
-        // 如果开启了人机模式，蓝方基地自动由 AI 选址
-        if (isAIMode) {
-            // ==========================================
-            // 【优化】利用 BFS 图论算法，强制 AI 与玩家基地保持距离
-            // ==========================================
-            const MIN_DISTANCE = 4; // 至少相隔 4 条黑线（跨越 3 个区域），避免贴脸
-            
-            // 1. 找出所有符合距离条件的候选区域
-            let candidateAreas = mapAreas.filter(area => {
-                if (area.id === redBaseId) return false; // 不能是红方基地
-                
-                // 调用已有的 ruleEngine 计算图论最短路径
-                const path = ruleEngine.getAreaPath(redBaseId, area.id);
-                if (!path) return false; // 如果被“阻断红线”隔绝或不可达，直接排除
-                
-                const distance = path.length - 1; // 计算跨越的黑线数量
-                return distance >= MIN_DISTANCE;
-            });
-
-            let selectedArea;
-            // 2. 如果有符合条件的距离足够远的区域，从中随机选一个
-            if (candidateAreas.length > 0) {
-                selectedArea = candidateAreas[Math.floor(Math.random() * candidateAreas.length)];
-            } else {
-                // 3. 兜底逻辑：如果地图被红线阻断得极其厉害，找不到这么远的区域，
-                // 强行选择距离红方基地“最远”的那块区域
-                let maxDist = -1;
-                for (const area of mapAreas) {
-                    if (area.id === redBaseId) continue;
-                    const path = ruleEngine.getAreaPath(redBaseId, area.id);
-                    if (path && path.length - 1 > maxDist) {
-                        maxDist = path.length - 1;
-                        selectedArea = area;
-                    }
-                }
-            }
-            
-            if (!selectedArea) {
-                // 即使地图拓扑不连通，也允许 AI 从任意非红方基地的区域开局。
-                selectedArea = mapAreas.find(area => area.id !== redBaseId);
-            }
-            if (!selectedArea) {
-                gamePhase = 'selectRed';
-                blueBaseId = null;
-                updateUI();
-                alert('无法为 AI 选择基地，请重新开始游戏。');
-                return;
-            }
-
-            blueBaseId = selectedArea.id;
-            // Base placement is deterministic setup logic, not an AI search.
-            // Enter the match immediately instead of simulating thinking time.
-            gamePhase = 'playing';
-            generateRootNodesInArea(redBaseId, 'red', 3);
-            generateRootNodesInArea(blueBaseId, 'blue', 3);
-            matchTracker = MatchTracker.start(game, activeMatchConfig || { mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value });
-            selectedNodeId = null;
-            drawer.renderMap(mapAreas, redBaseId, blueBaseId);
-            drawer.renderNodes(game.getAliveNodes(), selectedNodeId);
-            updateUI();
-            persistLastMatch();
-            // 如果玩家是红方，AI 是蓝方，轮到玩家先手。
-        }
+        // 所有模式统一由玩家先选红方基地，再选蓝方基地；AI 不参与基地选址。
         return;
     }
     if (gamePhase === 'selectBlue') {
@@ -1010,11 +1111,16 @@ document.getElementById('gameCanvas').addEventListener('click', (e) => {
         generateRootNodesInArea(redBaseId, 'red', 3);
         generateRootNodesInArea(blueBaseId, 'blue', 3);
         matchTracker = MatchTracker.start(game, activeMatchConfig || { mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value });
+        matchHistory = MatchHistory.start(captureHistorySnapshot());
+        undoManager = new UndoManager({ mode: isAIMode ? 'pve' : 'pvp', playerSide: activeMatchConfig?.playerSide || 'red' });
         selectedNodeId = null;
         drawer.renderMap(mapAreas, redBaseId, blueBaseId);
         drawer.renderNodes(game.getAliveNodes(), selectedNodeId);
         updateUI();
         persistLastMatch();
+        if (isAIMode && game.currentTurn === getAISide('pve', activeMatchConfig?.playerSide || 'red')) {
+            triggerAITurn();
+        }
         return;
     }
 
@@ -1078,6 +1184,7 @@ document.getElementById('gameCanvas').addEventListener('click', (e) => {
     const owner = game.currentTurn;
     const ownBaseId = owner === 'red' ? redBaseId : blueBaseId;
     const enemyBaseId = owner === 'red' ? blueBaseId : redBaseId;
+    const beforeActionSnapshot = captureHistorySnapshot();
     const growthResult = executeGrowthAction({
         gameState: game,
         ruleEngine,
@@ -1095,7 +1202,7 @@ document.getElementById('gameCanvas').addEventListener('click', (e) => {
 
     const newNode = growthResult.node;
     console.log(`【生长成功】父节点 ID: ${growthResult.action.parentNodeId}，新节点 ID: ${newNode.id}，位于区域 ${clickedAreaId}`);
-    processSuccessfulGrowth(newNode, owner);
+    processSuccessfulGrowth(newNode, owner, beforeActionSnapshot, growthResult.action);
 });
 
 pauseBtn.addEventListener('click', () => {
@@ -1125,6 +1232,14 @@ audioVolume?.addEventListener('input', event => {
     audio.setVolume(Number(event.target.value));
 });
 
+for (const [button, side] of [[undoRedBtn, 'red'], [undoBlueBtn, 'blue'], [undoPlayerBtn, null], [resultUndoRedBtn, 'red'], [resultUndoBlueBtn, 'blue'], [resultUndoPlayerBtn, null]]) {
+    button?.addEventListener('click', () => {
+        if (!undoMatchAction(side || activeMatchConfig?.playerSide || 'red')) {
+            showFeedback('当前无法悔棋：请检查行动记录、冷却状态或对局状态。', 'warning');
+        }
+    });
+}
+
 endTurnBtn.addEventListener('click', () => {
     if (isPaused || game.isGameOver || gamePhase !== 'playing' || isAnimating || isAIThinking) return;
     selectedNodeId = null;
@@ -1138,7 +1253,7 @@ function refreshLegalAreaHighlights() {
     // The preview is for the human player's current action only. In PVE,
     // never expose the AI's legal destinations while it is thinking or acting.
     if (gamePhase !== 'playing' || game.isGameOver || isAnimating || isAIThinking ||
-        (isAIMode && game.currentTurn === 'blue') || selectedNodeId === null) {
+        (isAIMode && game.currentTurn === getAISide('pve', activeMatchConfig?.playerSide || 'red')) || selectedNodeId === null) {
         return;
     }
 

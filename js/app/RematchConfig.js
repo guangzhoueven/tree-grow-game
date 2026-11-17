@@ -3,7 +3,9 @@ const DIFFICULTIES = new Set(['easy', 'medium', 'hard', 'expert']);
 
 /** Create a fresh immutable configuration without carrying match state forward. */
 export function createRematchConfig(previous) {
-    if (!previous || !MODES.has(previous.mode) || !DIFFICULTIES.has(previous.difficulty) || previous.playerSide !== 'red') {
+    if (!previous || !MODES.has(previous.mode) || !DIFFICULTIES.has(previous.difficulty) ||
+        !['red', 'blue'].includes(previous.playerSide) ||
+        (previous.mode === 'pvp' && previous.playerSide !== 'red')) {
         throw new TypeError('Cannot rematch from an invalid match configuration');
     }
     return Object.freeze({
