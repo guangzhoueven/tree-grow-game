@@ -59,6 +59,9 @@ const turnIndicator = document.getElementById('turnIndicator');
 const gameHint = document.getElementById('game-hint');
 const stageCaption = document.getElementById('stage-caption-text');
 const endTurnBtn = document.getElementById('endTurn');
+const undoRedBtn = document.getElementById('undo-red-btn');
+const undoBlueBtn = document.getElementById('undo-blue-btn');
+const undoPlayerBtn = document.getElementById('undo-player-btn');
 const saveBtn = document.getElementById('saveBtn');
 const loadBtn = document.getElementById('loadBtn');
 const pauseBtn = document.getElementById('pauseBtn');
@@ -562,6 +565,24 @@ function triggerAITurn() {
 }
 
 // 界面更新函数
+function updateUndoControls() {
+    const controls = [
+        { button: undoRedBtn, side: 'red', visible: !isAIMode },
+        { button: undoBlueBtn, side: 'blue', visible: !isAIMode },
+        { button: undoPlayerBtn, side: activeMatchConfig?.playerSide || 'red', visible: isAIMode }
+    ];
+    for (const { button, side, visible } of controls) {
+        if (!button) continue;
+        button.hidden = !visible;
+        if (!visible || !undoManager) { button.disabled = true; continue; }
+        const state = undoManager.getState(side);
+        button.textContent = `悔棋 · 剩余 ${state.remaining}`;
+        button.disabled = !undoManager.canUndo(side, { history: matchHistory, gamePhase, isAnimating, isAIThinking, isPaused });
+        button.title = state.coolingDown ? '完成一次新的有效生长后才能再次悔棋' :
+            state.remaining === 0 ? '本方悔棋次数已用完' : '撤销本方最近一次行动及其后的所有行动';
+    }
+}
+
 function updateUI() {
     if (pauseBtn) { pauseBtn.textContent = isPaused ? '继续' : '暂停'; pauseBtn.disabled = gamePhase !== 'playing' || game.isGameOver || isAnimating || isAIThinking; }
     if (restartBtn) restartBtn.disabled = isAnimating || isAIThinking;
@@ -591,6 +612,8 @@ function updateUI() {
         endTurnBtn.textContent = '⏭️ 跳过回合';
         endTurnBtn.disabled = game.isGameOver;
     }
+
+    updateUndoControls();
 
     if (stageCaption && gameHint) {
         if (isPaused) {
@@ -667,7 +690,7 @@ function getGameBlob() {
         return null;
     }
     const data = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         gameState: game.toJSON(),
         mapSeeds: mapManager.seeds,
         redBaseId: redBaseId,
@@ -676,7 +699,10 @@ function getGameBlob() {
         isAIMode: isAIMode,
         playerSide: activeMatchConfig?.playerSide || 'red',
         difficulty: activeMatchConfig?.difficulty || difficultySelect.value,
-        matchTracker: matchTracker?.toJSON() || null
+        matchTracker: matchTracker?.toJSON() || null,
+        matchHistory: matchHistory?.toJSON() || null,
+        undoManager: undoManager?.toJSON() || null,
+        lastMatchResult
     };
     return new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
 }
@@ -825,9 +851,32 @@ function applyLoadedGameData(data, sourceName = '存档') {
 
         activeMatchConfig = Object.freeze({ mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value, playerSide: isAIMode ? restoredPlayerSide : 'red' });
         matchTracker = MatchTracker.fromJSON(data.matchTracker) || MatchTracker.start(game, activeMatchConfig, { historyIncomplete: true });
-        // Until persisted history is added, a loaded legacy save starts a marked, non-undoable segment.
-        matchHistory = MatchHistory.start(captureHistorySnapshot(), { historyIncomplete: true });
-        undoManager = new UndoManager({ mode: isAIMode ? 'pve' : 'pvp', playerSide: activeMatchConfig.playerSide });
+        const currentSnapshot = {
+            gameState: game.toJSON(),
+            matchTracker: matchTracker?.toJSON() || null,
+            lastMatchResult: data.lastMatchResult || null
+        };
+        if (data.matchHistory) {
+            const restoredHistory = MatchHistory.fromJSON(data.matchHistory);
+            const latestSnapshot = restoredHistory.actions.length
+                ? restoredHistory.actions[restoredHistory.actions.length - 1].after
+                : restoredHistory.initialSnapshot;
+            if (JSON.stringify(latestSnapshot) !== JSON.stringify(currentSnapshot)) {
+                throw new TypeError('存档棋谱末端与当前对局状态不一致');
+            }
+            matchHistory = restoredHistory;
+        } else {
+            matchHistory = MatchHistory.start(currentSnapshot, { historyIncomplete: true });
+        }
+        if (data.undoManager) {
+            const restoredUndo = UndoManager.fromJSON(data.undoManager);
+            if (restoredUndo.mode !== activeMatchConfig.mode || restoredUndo.playerSide !== activeMatchConfig.playerSide) {
+                throw new TypeError('存档悔棋配置与对局模式不一致');
+            }
+            undoManager = restoredUndo;
+        } else {
+            undoManager = new UndoManager({ mode: isAIMode ? 'pve' : 'pvp', playerSide: activeMatchConfig.playerSide });
+        }
         appState.startMatch(activeMatchConfig);
         renderGame();
         updateUI();
@@ -880,7 +929,10 @@ function persistLastMatch() {
             redBaseId, blueBaseId, gamePhase, isAIMode,
             playerSide: activeMatchConfig?.playerSide || 'red',
             difficulty: activeMatchConfig?.difficulty || difficultySelect.value,
-            matchTracker: matchTracker?.toJSON() || null
+            matchTracker: matchTracker?.toJSON() || null,
+            matchHistory: matchHistory?.toJSON() || null,
+            undoManager: undoManager?.toJSON() || null,
+            lastMatchResult
         }));
     } catch (error) { console.warn('最近对局自动保存失败：', error); }
 }
@@ -1142,6 +1194,14 @@ audioMuteBtn?.addEventListener('click', () => {
 audioVolume?.addEventListener('input', event => {
     audio.setVolume(Number(event.target.value));
 });
+
+for (const [button, side] of [[undoRedBtn, 'red'], [undoBlueBtn, 'blue'], [undoPlayerBtn, null]]) {
+    button?.addEventListener('click', () => {
+        if (!undoMatchAction(side || activeMatchConfig?.playerSide || 'red')) {
+            showFeedback('当前无法悔棋：请检查行动记录、冷却状态或对局状态。', 'warning');
+        }
+    });
+}
 
 endTurnBtn.addEventListener('click', () => {
     if (isPaused || game.isGameOver || gamePhase !== 'playing' || isAnimating || isAIThinking) return;
