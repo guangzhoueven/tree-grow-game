@@ -108,6 +108,9 @@ const resultCombat = document.getElementById('result-combat');
 const resultEvents = document.getElementById('result-events');
 const resultEventsEmpty = document.getElementById('result-events-empty');
 const resultMenuBtn = document.getElementById('result-menu-btn');
+const resultUndoRedBtn = document.getElementById('result-undo-red-btn');
+const resultUndoBlueBtn = document.getElementById('result-undo-blue-btn');
+const resultUndoPlayerBtn = document.getElementById('result-undo-player-btn');
 const resultRematchBtn = document.getElementById('result-rematch-btn');
 const newGameBtn = document.getElementById('new-game-btn');
 const continueGameBtn = document.getElementById('continue-game-btn');
@@ -196,6 +199,8 @@ function recordCompletedGrowth(owner, action, beforeSnapshot) {
     if (!matchHistory || !undoManager || !beforeSnapshot) return;
     matchHistory.recordAction({ side: owner, action, beforeSnapshot, afterSnapshot: captureHistorySnapshot() });
     undoManager.onActionCompleted(owner);
+    updateUndoControls();
+    persistLastMatch();
 }
 
 function undoMatchAction(side) {
@@ -569,7 +574,10 @@ function updateUndoControls() {
     const controls = [
         { button: undoRedBtn, side: 'red', visible: !isAIMode },
         { button: undoBlueBtn, side: 'blue', visible: !isAIMode },
-        { button: undoPlayerBtn, side: activeMatchConfig?.playerSide || 'red', visible: isAIMode }
+        { button: undoPlayerBtn, side: activeMatchConfig?.playerSide || 'red', visible: isAIMode },
+        { button: resultUndoRedBtn, side: 'red', visible: !isAIMode && game.isGameOver },
+        { button: resultUndoBlueBtn, side: 'blue', visible: !isAIMode && game.isGameOver },
+        { button: resultUndoPlayerBtn, side: activeMatchConfig?.playerSide || 'red', visible: isAIMode && game.isGameOver }
     ];
     for (const { button, side, visible } of controls) {
         if (!button) continue;
@@ -851,6 +859,7 @@ function applyLoadedGameData(data, sourceName = '存档') {
 
         activeMatchConfig = Object.freeze({ mode: isAIMode ? 'pve' : 'pvp', difficulty: difficultySelect.value, playerSide: isAIMode ? restoredPlayerSide : 'red' });
         matchTracker = MatchTracker.fromJSON(data.matchTracker) || MatchTracker.start(game, activeMatchConfig, { historyIncomplete: true });
+        lastMatchResult = data.lastMatchResult || null;
         const currentSnapshot = {
             gameState: game.toJSON(),
             matchTracker: matchTracker?.toJSON() || null,
@@ -1195,7 +1204,7 @@ audioVolume?.addEventListener('input', event => {
     audio.setVolume(Number(event.target.value));
 });
 
-for (const [button, side] of [[undoRedBtn, 'red'], [undoBlueBtn, 'blue'], [undoPlayerBtn, null]]) {
+for (const [button, side] of [[undoRedBtn, 'red'], [undoBlueBtn, 'blue'], [undoPlayerBtn, null], [resultUndoRedBtn, 'red'], [resultUndoBlueBtn, 'blue'], [resultUndoPlayerBtn, null]]) {
     button?.addEventListener('click', () => {
         if (!undoMatchAction(side || activeMatchConfig?.playerSide || 'red')) {
             showFeedback('当前无法悔棋：请检查行动记录、冷却状态或对局状态。', 'warning');
